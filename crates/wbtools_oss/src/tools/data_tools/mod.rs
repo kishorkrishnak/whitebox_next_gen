@@ -6593,8 +6593,15 @@ impl Tool for RemoveRasterPolygonHolesTool {
             .unwrap_or(false);
 
         ctx.progress.info("running remove_raster_polygon_holes");
-        let input = Raster::read(&input_path)
-            .map_err(|e| ToolError::Execution(format!("failed reading input raster: {e}")))?;
+        let input = if memory_store::raster_is_memory_path(&input_path) {
+            memory_store::get_raster_arc_by_path(&input_path).ok_or_else(|| {
+                ToolError::Execution(format!("in-memory input raster not found: {input_path}"))
+            })?
+        } else {
+            Raster::read(&input_path)
+                .map(std::sync::Arc::new)
+                .map_err(|e| ToolError::Execution(format!("failed reading input raster: {e}")))?
+        };
         if input.bands != 1 {
             return Err(ToolError::Validation(
                 "input raster must be single-band for remove_raster_polygon_holes".to_string(),
@@ -6671,7 +6678,7 @@ impl Tool for RemoveRasterPolygonHolesTool {
                 .emit_unit_fraction(ctx.progress, (row as f64 + 1.0) / rows.max(1) as f64 * 0.35);
         }
 
-        let mut output = input.clone();
+        let mut output = input.as_ref().clone();
 
         // For each removable hole clump, fill with the most common neighbouring foreground value.
         for label in 1..next_label {

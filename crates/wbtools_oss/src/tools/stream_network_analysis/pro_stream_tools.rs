@@ -930,8 +930,7 @@ impl Tool for RiverCenterlinesTool {
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_else(|| format!("{}_centerlines.geojson", water_path));
 
-        let water = Raster::read(&water_path)
-            .map_err(|e| ToolError::Execution(format!("failed reading water raster: {}", e)))?;
+        let water = load_raster_mem(&water_path, "water")?;
 
         let rows = water.rows;
         let cols = water.cols;
@@ -1785,6 +1784,71 @@ fn run_ridge_valley_pipeline(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use wbcore::{AllowAllCapabilities, ProgressSink};
+    use wbraster::{RasterConfig, RasterFormat};
+
+    struct NoopProgress;
+    impl ProgressSink for NoopProgress {}
+
+    #[test]
+    fn ridge_and_valley_vectors_reads_internal_memory_rasters() {
+        static PROGRESS: NoopProgress = NoopProgress;
+        static CAPS: AllowAllCapabilities = AllowAllCapabilities;
+        let ctx = ToolContext {
+            progress: &PROGRESS,
+            capabilities: &CAPS,
+        };
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "wbw_ridge_valley_{}_{}",
+            std::process::id(),
+            unique
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dem_path = dir.join("dem.tif");
+        let ridges_path = dir.join("ridges.geojson");
+        let valleys_path = dir.join("valleys.geojson");
+
+        let mut dem = Raster::new(RasterConfig {
+            rows: 32,
+            cols: 32,
+            bands: 1,
+            nodata: -9999.0,
+            cell_size: 10.0,
+            ..Default::default()
+        });
+        for row in 0..32isize {
+            for col in 0..32isize {
+                let ridge = (row - 16).abs() as f64;
+                let valley = (col - 16).abs() as f64;
+                dem.set(0, row, col, 1000.0 + ridge * ridge - valley * valley)
+                    .unwrap();
+            }
+        }
+        dem.write(&dem_path, RasterFormat::GeoTiff).unwrap();
+
+        let mut args = ToolArgs::new();
+        args.insert("dem".to_string(), json!(dem_path));
+        args.insert("filter_size".to_string(), json!(11));
+        args.insert("min_length".to_string(), json!(2));
+        args.insert("output_ridges".to_string(), json!(ridges_path));
+        args.insert("output_valleys".to_string(), json!(valleys_path));
+
+        let result = RidgeAndValleyVectorsTool.run(&args, &ctx).unwrap();
+        assert_eq!(result.outputs.get("ridges_path"), Some(&json!(ridges_path)));
+        assert_eq!(
+            result.outputs.get("valleys_path"),
+            Some(&json!(valleys_path))
+        );
+        wbvector::read(&ridges_path).unwrap();
+        wbvector::read(&valleys_path).unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn merge_centerline_segments_connects_nearby_ends() {
